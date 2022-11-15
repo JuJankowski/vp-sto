@@ -33,7 +33,8 @@ Optional: The example notebooks additionally depend on [matplotlib](https://matp
 Clone the repository to your machine and install locally using:
 
     git clone https://github.com/JuJankowski/vp-sto
-    pip install -e vp-sto
+    cd vp-sto
+    pip install .
     
 ---
 ### Examples
