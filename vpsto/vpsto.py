@@ -2,53 +2,87 @@ import numpy as np
 from obf import OBF
 import cma
 
-class VPSTO():
-    def __init__(self, dq_max, ddq_max, N_eval, h=None):
-        """
-        Args:
-            ndof (int): number of degrees of freedom
-            T (float): duration of motion
-            N_eval (int): number of points to evaluate along trajectory
-            h (np array): delta t between two consecutive via points (should sum up to T)
-        """
-        self.dq_max = dq_max
-        self.ddq_max = ddq_max
-        self.ndof = len(dq_max)
-        self.s_eval = np.linspace(0, 1., N_eval)
-        self.obf = OBF(self.ndof)
-        self.N = 0
-        self.setup_basis(1, h)
+np.seterr(all="ignore") # ignore sqrt warning as it is handled inside the code
+
+class VPSTOOptions():
+    def __init__(self, ndof):
+        # Initialize with default parameters
+        self.ndof = ndof
+        self.vel_lim = 0.1 * np.ones(ndof)  # -vel_lim < dq < vel_lim (element-wise)
+        self.acc_lim = 1.0 * np.ones(ndof)  # -acc_lim < ddq < acc_lim (element-wise)
+        self.N_eval = 100                   # length of trajectories in cost function
+        self.N_via = 5                      # number of via-points
+        self.pop_size = 25                  # number of trajectories per population
+        self.sigma_init = 0.5               # initial variance of via-points for CMA-ES algo
+        self.max_iter = 1000                # maximum number of vpsto iterations
+        self.CMA_diagonal = False           # Set to True for faster, less accurate optimization (linear complexity)
+        
+class VPSTOSolution():
+    def __init__(self, ndof):
+        self.ndof = ndof
+        self.candidates = dict()
+        self.candidates['pos'] = None
+        self.candidates['vel'] = None
+        self.candidates['acc'] = None
+        self.candidates['T'] = 0.0
         self.w_best = None
-        self.T_best = None
-        self.x_init = None
+        self.T_best = 0.0
+        self.p_next = None
+        self.loss_list = []
         
-    def setup_basis(self, N, h=None):
-        """
-        Args:
-            N (int): number of via points to construct the trajectory, including the final point, excluding the initial point
-            h (np array): delta t between two consecutive via points (should sum up to T)
-        """
-        if N == self.N:
+    def get_trajectory(self, t):
+        if self.w_best is None:
+            print('No solution available. Run optimization first.')
+            return [], [], []
+            
+        N_via = int(len(self.w_best) / self.ndof) - 3
+        obf = OBF(self.ndof)
+        obf.setup_task(self.T_best * np.ones(N_via) / N_via)
+        Phi = obf.get_Phi(t)
+        dPhi = obf.get_dPhi(t)
+        ddPhi = obf.get_ddPhi(t)
+        return (Phi@self.w_best).reshape(-1,self.ndof), (dPhi@self.w_best).reshape(-1,self.ndof), (ddPhi@self.w_best).reshape(-1,self.ndof)
+        
+    def shift_solution_forward(self, delta_t, N_next=0):
+        if self.w_best is None:
+            print('No solution available. Run optimization first.')
             return
-        self.N = N
-        self.num_basis = N + 3
-        self.nw = self.num_basis * self.ndof
-        if h is None:
-            self.h = np.ones(N) / N
+        if N_next == 0:
+            N_next = self.opt.N_via
+        obf = OBF(self.ndof)
+        obf_via.setup_task(self.T_best * np.ones(N_via) / N_via)
+        T_next = self.T_best - delta_t
+        t_via = np.linspace(0, T_next, N_next+1) + dt
+        self.p_next = (obf_via.get_Phi(t_via) @ self.w_best).reshape(-1, self.ndof)[1:].flatten()
+
+class VPSTO():
+    def __init__(self, ndof):
+        self.opt = VPSTOOptions(ndof)
+        self.sol = VPSTOSolution(ndof)
+        
+    def setup_basis(self, fix_qT=False):
+        s_eval = np.linspace(0., 1., self.opt.N_eval)
+        obf = OBF(self.opt.ndof)
+        obf.setup_task(np.ones(self.opt.N_via)/self.opt.N_via)
+        
+        self.Phi = obf.get_Phi(s_eval)
+        self.dPhi = obf.get_dPhi(s_eval)
+        self.ddPhi = obf.get_ddPhi(s_eval)
+        
+        if fix_qT is False:
+            self.dPhi_p = self.dPhi[:, self.opt.ndof:-2*self.opt.ndof]
+            self.dPhi_b = np.concatenate((self.dPhi[:, :self.opt.ndof],
+                                          self.dPhi[:, -2*self.opt.ndof:]), axis=1)
+            self.ddPhi_p = self.ddPhi[:, self.opt.ndof:-2*self.opt.ndof]
+            self.ddPhi_b = np.concatenate((self.ddPhi[:, :self.opt.ndof],
+                                           self.ddPhi[:, -2*self.opt.ndof:]), axis=1)
         else:
-            self.h = h
-        self.obf.setup_task(self.h)
-        
-        self.Phi = self.obf.get_Phi(self.s_eval)
-        self.dPhi = self.obf.get_dPhi(self.s_eval)
-        self.ddPhi = self.obf.get_ddPhi(self.s_eval)
-        
-        self.dPhi_p = self.dPhi[:, self.ndof:-2*self.ndof]
-        self.dPhi_b = np.concatenate((self.dPhi[:, :self.ndof],
-                                      self.dPhi[:, -2*self.ndof:]), axis=1)
-        self.ddPhi_p = self.ddPhi[:, self.ndof:-2*self.ndof]
-        self.ddPhi_b = np.concatenate((self.ddPhi[:, :self.ndof],
-                                       self.ddPhi[:, -2*self.ndof:]), axis=1)
+            self.dPhi_p = self.dPhi[:, self.opt.ndof:-3*self.opt.ndof]
+            self.dPhi_b = np.concatenate((self.dPhi[:, :self.opt.ndof],
+                                          self.dPhi[:, -3*self.opt.ndof:]), axis=1)
+            self.ddPhi_p = self.ddPhi[:, self.opt.ndof:-3*self.opt.ndof]
+            self.ddPhi_b = np.concatenate((self.ddPhi[:, :self.opt.ndof],
+                                           self.ddPhi[:, -3*self.opt.ndof:]), axis=1)
         
         sigma_p = np.linalg.inv(self.ddPhi_p.T @ self.ddPhi_p)
         self.ddPhi_p_pinv = sigma_p @ self.ddPhi_p.T
@@ -57,90 +91,83 @@ class VPSTO():
         sigma_via = V @ D @ V.T
         self.sigma_p_chol = np.linalg.cholesky(sigma_via)
         self.sigma_p_chol_inv = np.linalg.inv(self.sigma_p_chol)
-    
-    def sample_trajectory(self, t):
-        obf = OBF(self.ndof)
-        h = self.T_best * np.ones(self.N) / self.N
-        obf.setup_task(h)
-        Phi = obf.get_Phi(t)
-        dPhi = obf.get_dPhi(t)
-        ddPhi = obf.get_ddPhi(t)
-        return (Phi@self.w_best).reshape(-1,self.ndof), (dPhi@self.w_best).reshape(-1,self.ndof), (ddPhi@self.w_best).reshape(-1,self.ndof)
-    
-    def shift_solution_forward(self, dt, q_0, dq_bound, N_next=0):
-        if self.w_best is None:
-            return
-        if N_next == 0:
-            N_next = self.N
-        obf_via = OBF(self.ndof)
-        h = self.T_best * np.ones(self.N) / self.N
-        obf_via.setup_task(h)
-        T_next = self.T_best - dt
-        t_via = np.linspace(0, T_next, N_next+1) + dt
-        p_next = (obf_via.get_Phi(t_via) @ self.w_best).reshape(-1, self.ndof)[1:]
-        self.setup_basis(N_next)
-        mu_p = - self.ddPhi_p_pinv @ self.ddPhi_b @ np.concatenate((q_0, dq_bound))
-        self.x_init = self.sigma_p_chol_inv @ (p_next.flatten() - mu_p)
 
-    def get_duration(self, p_list, q_0, dq_bound):
-        dq_q = (p_list @ self.dPhi_p.T + self.dPhi_b[:,:self.ndof] @ q_0).reshape(len(p_list), -1, self.ndof)
-        dq_dq = (self.dPhi_b[:,self.ndof:] @ dq_bound).reshape(-1, self.ndof)
-        T_dq = np.maximum(np.max(dq_q / (self.dq_max - dq_dq), axis=(1, 2)),
-                          np.max(- dq_q / (self.dq_max + dq_dq), axis=(1, 2)))
+    def get_duration(self, q_via_list, dq_bound):
+        pop_size = len(q_via_list)
+        dq_q = (q_via_list @ self.dPhi[:,:-2*self.opt.ndof].T).reshape(pop_size, -1, self.opt.ndof)
+        dq_dq = (self.dPhi[:,-2*self.opt.ndof:] @ dq_bound).reshape(-1, self.opt.ndof)
+        T_dq = np.maximum(np.max(dq_q / (self.opt.vel_lim - dq_dq), axis=(1, 2)),
+                          np.max(- dq_q / (self.opt.vel_lim + dq_dq), axis=(1, 2)))
         
-        ddq_q = (p_list @ self.ddPhi_p.T + self.ddPhi_b[:,:self.ndof] @ q_0).reshape(len(p_list), -1, self.ndof)
-        ddq_dq = (self.ddPhi_b[:,self.ndof:] @ dq_bound).reshape(-1, self.ndof)
-        T_p = ddq_dq / (2. * self.ddq_max)
-        T_ddq = np.maximum(np.max(T_p + np.nan_to_num(np.sqrt(T_p**2 + ddq_q / self.ddq_max), nan=-np.inf), axis=(1, 2)),
-                           np.max(-T_p + np.nan_to_num(np.sqrt(T_p**2 - ddq_q / self.ddq_max), nan=-np.inf), axis=(1, 2)))
+        ddq_q = (q_via_list @ self.ddPhi[:,:-2*self.opt.ndof].T).reshape(pop_size, -1, self.opt.ndof)
+        ddq_dq = (self.ddPhi[:,-2*self.opt.ndof:] @ dq_bound).reshape(-1, self.opt.ndof)
+        T_p = ddq_dq / (2. * self.opt.acc_lim)
+        T_ddq = np.maximum(np.max(T_p + np.nan_to_num(np.sqrt(T_p**2 + ddq_q / self.opt.acc_lim), nan=-np.inf), axis=(1, 2)),
+                           np.max(-T_p + np.nan_to_num(np.sqrt(T_p**2 - ddq_q / self.opt.acc_lim), nan=-np.inf), axis=(1, 2)))
         return np.maximum(T_dq, T_ddq)
     
-    def get_phenotype(self, p_list, q_0, dq_bound):
+    def compute_phenotype_candidates(self, p_list, q_0, q_T, dq_bound):
+        pop_size = len(p_list)
         # Compute duration of each movement and roll out
-        T_list = self.get_duration(p_list, q_0, dq_bound)
-        w_list = np.concatenate((np.tile(q_0, (len(p_list), 1)), p_list, 
-                                 np.diag(T_list) @ np.tile(dq_bound, (len(p_list), 1))), axis=1)
-        Population = dict()
-        Population['Q'] = (w_list @ self.Phi.T).reshape(len(p_list), -1, self.ndof)
-        Population['dQ'] = (np.diag(1/T_list) @ (w_list @ self.dPhi.T)).reshape(len(p_list), -1, self.ndof)
-        Population['ddQ'] = (np.diag(1/T_list**2) @ (w_list @ self.ddPhi.T)).reshape(len(p_list), -1, self.ndof)
-        Population['T'] = T_list
-        return Population
+        if q_T is None:
+            q_via_list = np.concatenate((np.tile(q_0, (pop_size, 1)), p_list), axis=1)
+        else:
+            q_via_list = np.concatenate((np.tile(q_0, (pop_size, 1)), 
+                                         p_list, 
+                                         np.tile(q_T, (pop_size, 1))), axis=1)
+        T_list = self.get_duration(q_via_list, dq_bound)
+        w_list = np.concatenate((q_via_list, 
+                                 np.diag(T_list) @ np.tile(dq_bound, (pop_size, 1))), axis=1)
+        self.sol.candidates['pos'] = (w_list @ self.Phi.T).reshape(pop_size, -1, self.opt.ndof)
+        self.sol.candidates['vel'] = (np.diag(1/T_list) @ (w_list @ self.dPhi.T)).reshape(pop_size, -1, self.opt.ndof)
+        self.sol.candidates['acc'] = (np.diag(1/T_list**2) @ (w_list @ self.ddPhi.T)).reshape(pop_size, -1, self.opt.ndof)
+        self.sol.candidates['T'] = T_list
         
-    def minimize(self, loss, q_0, dq_bound, sigma_init=1.0, max_iter=1000, popsize=10, CMA_diagonal=False):
-        dim_x = self.N * self.ndof
-        
-        if self.x_init is None:
+    def minimize(self, loss, q_0, q_T=None, dq_bound=None):
+        if dq_bound is None:
+            dq_bound = np.zeros(2*self.opt.ndof)
+        if q_T is None:
+            dim_x = self.opt.ndof * self.opt.N_via
+            self.setup_basis(fix_qT = False)
+            mu_p = - self.ddPhi_p_pinv @ self.ddPhi_b @ np.concatenate((q_0, dq_bound))
+        else:
+            dim_x = self.opt.ndof * (self.opt.N_via - 1)
+            self.setup_basis(fix_qT = True)
+            mu_p = - self.ddPhi_p_pinv @ self.ddPhi_b @ np.concatenate((q_0, q_T, dq_bound))
+    
+        if self.sol.p_next is None:
             x_init = np.zeros(dim_x)
         else:
-            x_init = self.x_init.copy()
-        self.x_init = None
-            
-        mu_p = - self.ddPhi_p_pinv @ self.ddPhi_b @ np.concatenate((q_0, dq_bound))
+            x_init = self.sigma_p_chol_inv @ (self.sol.p_next - mu_p)
+            self.sol.p_next = None
         
-        cmaes = cma.CMAEvolutionStrategy(x_init, sigma_init, 
-                                         {'CMA_diagonal': CMA_diagonal, 
+        cmaes = cma.CMAEvolutionStrategy(x_init, self.opt.sigma_init, 
+                                         {'CMA_diagonal': self.opt.CMA_diagonal, 
                                           'verbose': -1,
                                           'CMA_active': True,
-                                          'popsize': popsize,
+                                          'popsize': self.opt.pop_size,
                                           'tolfun': 1e-9})
-        loss_list = []
+        self.sol.loss_list = []
         i = 0
-        while not cmaes.stop() and i < max_iter:
+        while not cmaes.stop() and i < self.opt.max_iter:
             x_samples = np.array(cmaes.ask())
             p_samples = mu_p+(self.sigma_p_chol@x_samples.T).T
-            pop = self.get_phenotype(p_samples, q_0, dq_bound)
-            cmaes.tell(x_samples, loss(pop))
-            #Res_pop = self.get_phenotype(np.array([mu_p+self.sigma_p_chol@cmaes.result.xfavorite]), q_0, dq_bound)
-            #loss_list.append(loss(Res_pop)[0])
-            print(i, end='\r')
+            self.compute_phenotype_candidates(p_samples, q_0, q_T, dq_bound)
+            costs = loss(self.sol.candidates)
+            cmaes.tell(x_samples, costs)
+            self.sol.loss_list.append(np.min(costs))
+            print('# VP-STO iteration: ', i, end='\r')
             i += 1
         
         x_best = cmaes.result.xfavorite
         p_best = mu_p+self.sigma_p_chol@x_best
-        Res_pop = self.get_phenotype(np.array([p_best]), q_0, dq_bound)
-        loss_list.append(loss(Res_pop)[0])
-        self.w_best = np.concatenate((q_0, p_best, dq_bound))
-        self.T_best = Res_pop['T'][0]
+        if q_T is None:
+            q_via_list = np.concatenate((q_0, p_best))
+        else:
+            q_via_list = np.concatenate((q_0, p_best, q_T))
+        self.sol.w_best = np.concatenate((q_via_list, dq_bound))
+        self.sol.T_best = self.get_duration(q_via_list.reshape(1,-1), dq_bound)[0]
         
-        return Res_pop['Q'][0], Res_pop['dQ'][0], Res_pop['ddQ'][0], Res_pop['T'][0], loss_list
+        print('VP-STO finished after', i, 'iterations with a final loss of', self.sol.loss_list[-1])
+        
+        return self.sol
