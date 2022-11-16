@@ -1,6 +1,7 @@
 import numpy as np
-from obf import OBF
 import cma
+
+from .obf import OBF
 
 np.seterr(all="ignore") # ignore sqrt warning as it is handled inside the code
 

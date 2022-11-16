@@ -23,5 +23,6 @@ setup(name="vpsto",
       install_requires=["numpy", "cma"],
       extras_require={
             "plotting": ["matplotlib"],
+            "collision": ["shapely"],
       },
 )

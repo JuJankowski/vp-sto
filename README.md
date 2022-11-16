@@ -1,4 +1,4 @@
-# Via-Point based Stochastic Trajectory Optimization
+## Via-Point based Stochastic Trajectory Optimization
 
 This repository contains python code for hands-on numerical, gradient-free, time-optimal trajectory optimization. It implements the [VP-STO](https://sites.google.com/oxfordrobotics.institute/vp-sto) stochastic trajectory optimizer. The code is intended for offline planning purposes.
 
@@ -35,6 +35,8 @@ Clone the repository to your machine and install locally using:
     git clone https://github.com/JuJankowski/vp-sto
     cd vp-sto
     pip install .
+    
+Note: If you want to install vp-sto in a conda environment, make sure to use the pip binary that is installed through conda.
     
 ---
 ### Examples
