@@ -1,5 +1,7 @@
 import numpy as np
 import cma
+import threading
+import concurrent.futures
 
 from .obf import OBF
 
@@ -17,6 +19,7 @@ class VPSTOOptions():
         self.sigma_init = 0.5               # initial variance of via-points for CMA-ES algo
         self.max_iter = 1000                # maximum number of vpsto iterations
         self.CMA_diagonal = False           # Set to True for faster, less accurate optimization (linear complexity)
+        self.multithreading = False         # Set to True for concurrently executing the cost evaluation
         
 class VPSTOSolution():
     def __init__(self, ndof):
@@ -124,6 +127,25 @@ class VPSTO():
         self.sol.candidates['acc'] = (np.diag(1/T_list**2) @ (w_list @ self.ddPhi.T)).reshape(pop_size, -1, self.opt.ndof)
         self.sol.candidates['T'] = T_list
         
+    def call_loss_multithreading(self, loss, candidate, costs, idx):
+        costs[idx] = loss(candidate)
+        
+    def loss_multithread(self, loss):
+        costs = np.empty(self.opt.pop_size)
+        candidates = []
+        for i in range(self.opt.pop_size):
+            candidates.append({'pos': self.sol.candidates['pos'][i],
+                               'vel': self.sol.candidates['vel'][i],
+                               'acc': self.sol.candidates['acc'][i],
+                               'T': self.sol.candidates['T'][i]})
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.opt.pop_size) as executor:
+          futures = []
+          for i in range(self.opt.pop_size):
+            futures.append(executor.submit(self.call_loss_multithreading, loss, candidates[i], costs, i))
+          for future in concurrent.futures.as_completed(futures):
+            future.result()
+        return costs
+        
     def minimize(self, loss, q_0, q_T=None, dq_bound=None):
         if dq_bound is None:
             dq_bound = np.zeros(2*self.opt.ndof)
@@ -154,7 +176,10 @@ class VPSTO():
             x_samples = np.array(cmaes.ask())
             p_samples = mu_p+(self.sigma_p_chol@x_samples.T).T
             self.compute_phenotype_candidates(p_samples, q_0, q_T, dq_bound)
-            costs = loss(self.sol.candidates)
+            if self.opt.multithreading is False:
+                costs = loss(self.sol.candidates)
+            else:
+                costs = self.loss_multithread(loss)
             cmaes.tell(x_samples, costs)
             self.sol.loss_list.append(np.min(costs))
             print('# VP-STO iteration: ', i, end='\r')

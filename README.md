@@ -17,9 +17,10 @@ Features:
 ---
 ### Dependencies
 
-The optimization algorithm only depends on [numpy](https://numpy.org) and [pycma](https://github.com/CMA-ES/pycma). Those can be installed by
+The optimization algorithm depends on [numpy](https://numpy.org), [threaded](https://pypi.org/project/threaded) and [pycma](https://github.com/CMA-ES/pycma). Those can be installed by
 
     pip install numpy
+    pip install threaded
     pip install git+https://github.com/CMA-ES/pycma.git@master
 
 Optional: The example notebooks additionally depend on [matplotlib](https://matplotlib.org/stable/index.html) and [shapely](https://pypi.org/project/shapely/). Those can be installed by
@@ -69,3 +70,9 @@ Output:
 ```
 VP-STO finished after 859 iterations with a final loss of 2.3076923079983196
 ```
+
+It is also possible to evaluate the trajectory costs in concurrent threads. For this, simply set the corresponding flag to:
+```
+vpsto.opt.multithreading = True
+```
+In the multithreading case, note that the custom loss function only takes a single candidate trajectory as input and is expected to return a single cost value. Multithreading can drastically speed up the optimization when the cost evaluation for a single trajectory is computationally expensive, e.g. when doing collision checks for an articulated robot arm. For cheap cost functions, such as the provided examples, the speed up due to paralellization does not compensate for the extra effort of creating the threads.
