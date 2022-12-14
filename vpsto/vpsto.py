@@ -51,13 +51,14 @@ class VPSTOSolution():
         if self.w_best is None:
             print('No solution available. Run optimization first.')
             return
+        N_via = int(len(self.w_best) / self.ndof) - 3
         if N_next == 0:
-            N_next = self.opt.N_via
+            N_next = N_via
         obf = OBF(self.ndof)
-        obf_via.setup_task(self.T_best * np.ones(N_via) / N_via)
+        obf.setup_task(self.T_best * np.ones(N_via) / N_via)
         T_next = self.T_best - delta_t
-        t_via = np.linspace(0, T_next, N_next+1) + dt
-        self.p_next = (obf_via.get_Phi(t_via) @ self.w_best).reshape(-1, self.ndof)[1:].flatten()
+        t_via = np.linspace(0, T_next, N_next+1) + delta_t
+        self.p_next = (obf.get_Phi(t_via) @ self.w_best).reshape(-1, self.ndof)[1:].flatten()
 
 class VPSTO():
     def __init__(self, ndof):
@@ -139,11 +140,11 @@ class VPSTO():
                                'acc': self.sol.candidates['acc'][i],
                                'T': self.sol.candidates['T'][i]})
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.opt.pop_size) as executor:
-          futures = []
-          for i in range(self.opt.pop_size):
-            futures.append(executor.submit(self.call_loss_multithreading, loss, candidates[i], costs, i))
-          for future in concurrent.futures.as_completed(futures):
-            future.result()
+            futures = []
+            for i in range(self.opt.pop_size):
+                futures.append(executor.submit(self.call_loss_multithreading, loss, candidates[i], costs, i))
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
         return costs
         
     def minimize(self, loss, q_0, q_T=None, dq_bound=None):
@@ -181,8 +182,8 @@ class VPSTO():
             else:
                 costs = self.loss_multithread(loss)
             cmaes.tell(x_samples, costs)
-            self.sol.loss_list.append(np.min(costs))
-            print('# VP-STO iteration: ', i, end='\r')
+            self.sol.loss_list.append(np.mean(costs))
+            print('# VP-STO iteration:', i, 'Mean loss:', self.sol.loss_list[-1], end='\r')
             i += 1
         
         x_best = cmaes.result.xfavorite
