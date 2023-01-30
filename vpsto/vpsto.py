@@ -2,6 +2,7 @@ import numpy as np
 import cma
 import threading
 import concurrent.futures
+from copy import deepcopy
 
 from .obf import OBF
 
@@ -29,6 +30,7 @@ class VPSTOSolution():
         self.candidates['vel'] = None
         self.candidates['acc'] = None
         self.candidates['T'] = 0.0
+        self.candidates_0 = None
         self.w_best = None
         self.T_best = 0.0
         self.p_next = None
@@ -41,7 +43,8 @@ class VPSTOSolution():
             
         N_via = int(len(self.w_best) / self.ndof) - 3
         obf = OBF(self.ndof)
-        obf.setup_task(self.T_best * np.ones(N_via) / N_via)
+        T = np.max([self.T_best, 1e-3])
+        obf.setup_task(T * np.ones(N_via) / N_via)
         Phi = obf.get_Phi(t)
         dPhi = obf.get_dPhi(t)
         ddPhi = obf.get_ddPhi(t)
@@ -59,6 +62,20 @@ class VPSTOSolution():
         T_next = self.T_best - delta_t
         t_via = np.linspace(0, T_next, N_next+1) + delta_t
         self.p_next = (obf.get_Phi(t_via) @ self.w_best).reshape(-1, self.ndof)[1:].flatten()
+        
+    def shift_solution_backward(self, delta_t, N_next=0):
+        if self.w_best is None:
+            print('No solution available. Run optimization first.')
+            return
+        N_via = int(len(self.w_best) / self.ndof) - 3
+        if N_next == 0:
+            N_next = N_via
+        obf = OBF(self.ndof)
+        obf.setup_task(self.T_best * np.ones(N_via) / N_via)
+        T_next = self.T_best - delta_t
+        t_via = np.linspace(0, T_next, N_next+1) + delta_t
+        q_via = (obf.get_Phi(t_via) @ self.w_best).reshape(-1, self.ndof)
+        self.p_next = (q_via[1:] - q_via[0]) .flatten()
 
 class VPSTO():
     def __init__(self, ndof):
@@ -132,16 +149,17 @@ class VPSTO():
         costs[idx] = loss(candidate)
         
     def loss_multithread(self, loss):
-        costs = np.empty(self.opt.pop_size)
+        pop_size = len(self.sol.candidates['T'])
+        costs = np.empty(pop_size)
         candidates = []
-        for i in range(self.opt.pop_size):
+        for i in range(pop_size):
             candidates.append({'pos': self.sol.candidates['pos'][i],
                                'vel': self.sol.candidates['vel'][i],
                                'acc': self.sol.candidates['acc'][i],
                                'T': self.sol.candidates['T'][i]})
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.opt.pop_size) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=pop_size) as executor:
             futures = []
-            for i in range(self.opt.pop_size):
+            for i in range(pop_size):
                 futures.append(executor.submit(self.call_loss_multithreading, loss, candidates[i], costs, i))
             for future in concurrent.futures.as_completed(futures):
                 future.result()
@@ -177,6 +195,8 @@ class VPSTO():
             x_samples = np.array(cmaes.ask())
             p_samples = mu_p+(self.sigma_p_chol@x_samples.T).T
             self.compute_phenotype_candidates(p_samples, q_0, q_T, dq_bound)
+            if i == 0:
+                self.sol.candidates_0 = deepcopy(self.sol.candidates)
             if self.opt.multithreading is False:
                 costs = loss(self.sol.candidates)
             else:
@@ -198,3 +218,81 @@ class VPSTO():
         print('VP-STO finished after', i, 'iterations with a final loss of', self.sol.loss_list[-1])
         
         return self.sol
+
+    def randomsearch(self, loss, q_0, dq_bound=None, sigma_track=1e-4, q_T_bias=None, r=1e-1, Q=None):
+        if dq_bound is None:
+            dq_bound = np.zeros(2*self.opt.ndof)
+        if q_T_bias is None:
+            q_T_bias = np.zeros(self.opt.ndof)
+        if Q is None:
+            Q = 0.0 * np.eye(self.opt.ndof)
+
+        dim_x = self.opt.ndof * self.opt.N_via
+        self.setup_basis(fix_qT = False)
+        
+        prec_smooth = self.ddPhi_p.T @ self.ddPhi_p * r / self.opt.N_eval
+        ddPhi_p_pinv = np.linalg.inv(prec_smooth) @ self.ddPhi_p.T * r / self.opt.N_eval
+        mu_smooth = - ddPhi_p_pinv @ self.ddPhi_b @ np.concatenate((q_0, dq_bound))
+        
+        Phi_T = self.Phi[-self.opt.ndof:, self.opt.ndof:-2*self.opt.ndof]
+        prec_bias = Phi_T.T @ Q @ Phi_T
+        mu_bias = np.tile(q_T_bias, self.opt.N_via)
+        
+        prec_via = prec_smooth + prec_bias
+        sigma_via = np.linalg.inv(prec_via)
+        mu_via = sigma_via @ (prec_smooth @ mu_smooth + prec_bias @ mu_bias)
+    
+        if self.sol.p_next is None:
+            p_samples = np.random.multivariate_normal(mu_via, sigma_via, self.opt.pop_size-1)
+        else:
+            mu_prior = self.sol.p_next
+            prec_prior = np.eye(dim_x) / sigma_track
+            prec_post = prec_smooth + prec_prior
+            sigma_post = np.linalg.inv(prec_post)
+            mu_post = sigma_post @ (prec_prior @ mu_prior + prec_smooth @ mu_smooth)
+            num_samples = int(self.opt.pop_size*0.5)-1
+            p_samples = np.random.multivariate_normal(mu_post, sigma_post, num_samples)
+            self.sol.p_next = None
+        
+        p_samples = np.concatenate((mu_smooth.reshape(1,-1), p_samples), axis=0) # mu_smooth is zero action
+        self.compute_phenotype_candidates(p_samples, q_0, None, dq_bound)
+        self.sol.candidates_0 = deepcopy(self.sol.candidates)
+        if self.opt.multithreading is False:
+            costs = loss(self.sol.candidates)
+        else:
+            costs = self.loss_multithread(loss)
+        i_best = np.argmin(costs)
+        p_best = p_samples[i_best]
+        q_via_list = np.concatenate((q_0, p_best))
+        self.sol.w_best = np.concatenate((q_via_list, dq_bound))
+        self.sol.T_best = self.get_duration(q_via_list.reshape(1,-1), dq_bound)[0]
+        self.sol.loss_list = [costs[i_best]]
+        
+        print('VP-STO finished with a final loss of', costs[i_best], 'and duration of', self.sol.T_best)
+        
+        return self.sol
+
+    def sample_via_points(self, q_0, q_T=None, dq_bound=None, q_T_bias=None, r=1e-1, Q=None):
+        if dq_bound is None:
+            dq_bound = np.zeros(2*self.opt.ndof)
+        if q_T_bias is None:
+            q_T_bias = np.zeros(self.opt.ndof)
+        if Q is None:
+            Q = 0.0 * np.eye(self.opt.ndof)
+
+        dim_x = self.opt.ndof * self.opt.N_via
+        self.setup_basis(fix_qT = False)
+        
+        prec_smooth = self.ddPhi_p.T @ self.ddPhi_p * r / self.opt.N_eval
+        ddPhi_p_pinv = np.linalg.inv(prec_smooth) @ self.ddPhi_p.T * r / self.opt.N_eval
+        mu_smooth = - ddPhi_p_pinv @ self.ddPhi_b @ np.concatenate((q_0, dq_bound))
+        
+        Phi_T = self.Phi[-self.opt.ndof:, self.opt.ndof:-2*self.opt.ndof]
+        prec_bias = Phi_T.T @ Q @ Phi_T
+        mu_bias = np.tile(q_T_bias, self.opt.N_via)
+        
+        prec_via = prec_smooth + prec_bias
+        sigma_via = np.linalg.inv(prec_via)
+        mu_via = sigma_via @ (prec_smooth @ mu_smooth + prec_bias @ mu_bias)
+        
+        return np.random.multivariate_normal(mu_via, sigma_via)
