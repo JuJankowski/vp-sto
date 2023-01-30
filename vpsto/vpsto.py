@@ -250,11 +250,13 @@ class VPSTO():
             prec_post = prec_smooth + prec_prior
             sigma_post = np.linalg.inv(prec_post)
             mu_post = sigma_post @ (prec_prior @ mu_prior + prec_smooth @ mu_smooth)
-            num_samples = int(self.opt.pop_size*0.5)-1
-            p_samples = np.random.multivariate_normal(mu_post, sigma_post, num_samples)
+            num_samples = int(self.opt.pop_size*0.1)-2
+            #p_samples = np.random.multivariate_normal(mu_post, sigma_post, num_samples)
+            #p_samples = np.concatenate((mu_prior.reshape(1,-1), p_samples), axis=0)
+            p_samples = mu_prior.reshape(1,-1)
             self.sol.p_next = None
         
-        p_samples = np.concatenate((mu_smooth.reshape(1,-1), p_samples), axis=0) # mu_smooth is zero action
+        #p_samples = np.concatenate((mu_smooth.reshape(1,-1), p_samples), axis=0) # mu_smooth is zero action
         self.compute_phenotype_candidates(p_samples, q_0, None, dq_bound)
         self.sol.candidates_0 = deepcopy(self.sol.candidates)
         if self.opt.multithreading is False:
