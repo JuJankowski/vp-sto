@@ -243,7 +243,7 @@ class VPSTO():
         mu_via = sigma_via @ (prec_smooth @ mu_smooth + prec_bias @ mu_bias)
     
         if self.sol.p_next is None:
-            p_samples = np.random.multivariate_normal(mu_via, sigma_via, self.opt.pop_size-1)
+            p_samples = np.random.multivariate_normal(mu_via, sigma_via, self.opt.pop_size)
         else:
             mu_prior = self.sol.p_next
             prec_prior = np.eye(dim_x) / sigma_track
