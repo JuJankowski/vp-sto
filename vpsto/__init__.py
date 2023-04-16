@@ -9,15 +9,11 @@ __license__ = "BSD 3-clause"
 
 import warnings as _warnings
 
-# __package__ = 'vpsto'
 try:
     import numpy
     del numpy
 except ImportError:
     _warnings.warn('Install `numpy` ("pip install numpy").')
-else:
-    from . import obf, vpsto
-    from .vpsto import VPSTO
 
 del division, print_function, absolute_import, with_statement
 

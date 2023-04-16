@@ -1,300 +1,245 @@
 import numpy as np
 import cma
-import threading
 import concurrent.futures
-from copy import deepcopy
 
 from .obf import OBF
+from .vptraj import VPTraj
 
-np.seterr(all="ignore") # ignore sqrt warning as it is handled inside the code
-
-class VPSTOOptions():
+# Collection of options for the VPSTO algorithm
+class VPSTOOptions:
     def __init__(self, ndof):
         # Initialize with default parameters
         self.ndof = ndof
-        self.vel_lim = 0.1 * np.ones(ndof)  # -vel_lim < dq < vel_lim (element-wise)
-        self.acc_lim = 1.0 * np.ones(ndof)  # -acc_lim < ddq < acc_lim (element-wise)
-        self.N_eval = 100                   # length of trajectories in cost function
+        self.vel_lim = 0.1 * np.ones(ndof)  # -vel_lim < dq < vel_lim (element-wise),
+                                            # ignored if traj_duration is not None
+        self.acc_lim = 1.0 * np.ones(ndof)  # -acc_lim < ddq < acc_lim (element-wise),
+                                            # ignored if traj_duration is not None
+        self.traj_duration = None           # duration of the trajectory (scalar), 
+                                            # will be computed from vel_lim and acc_lim if None
+        self.N_eval = 100                   # number of evaluation points along trajectories in cost function
         self.N_via = 5                      # number of via-points
         self.pop_size = 25                  # number of trajectories per population
         self.sigma_init = 0.5               # initial variance of via-points for CMA-ES algo
         self.max_iter = 1000                # maximum number of vpsto iterations
         self.CMA_diagonal = False           # Set to True for faster, less accurate optimization (linear complexity)
         self.multithreading = False         # Set to True for concurrently executing the cost evaluation
-        
-class VPSTOSolution():
-    def __init__(self, ndof):
-        self.ndof = ndof
+        self.log = False                    # Set to True for logging the optimization process
+        self.verbose = True                 # Set to True for printing the optimization progress
+
+# Container for the current solution of the VPSTO algorithm
+class VPSTOSolution:
+    def __init__(self, options):
+        self.ndof = options.ndof
+        self.N_via = options.N_via
+        self.log = options.log
         self.candidates = dict()
         self.candidates['pos'] = None
         self.candidates['vel'] = None
         self.candidates['acc'] = None
         self.candidates['T'] = 0.0
-        self.candidates_0 = None
-        self.w_best = None
-        self.T_best = 0.0
-        self.p_next = None
-        self.loss_list = []
         
-    def get_trajectory(self, t):
+        self.p_best = None # current best solution for the via-point parameters
+        self.p_mean = None # current mean solution of the via-point parameters
+        self.c_best = None # current best cost
+        self.T_best = None # duration of the best solution
+
+        self.w_best = None # best solution for the via-point parameters (only available after optimization)
+
+        # log containers
+        if self.log:
+            self.candidates_list = []
+            self.loss_list = []
+            self.via_mean_list = []
+            self.via_best_list = []
+        
+    def get_posvelacc(self, t):
+        # Return the position, velocity and acceleration at time t
+        # of the best available trajectory
+        # t: time. Can be a scalar or a vector
+
         if self.w_best is None:
             print('No solution available. Run optimization first.')
             return [], [], []
-            
-        N_via = int(len(self.w_best) / self.ndof) - 3
+                    
         obf = OBF(self.ndof)
         T = np.max([self.T_best, 1e-3])
-        obf.setup_task(T * np.ones(N_via) / N_via)
-        Phi = obf.get_Phi(t)
-        dPhi = obf.get_dPhi(t)
-        ddPhi = obf.get_ddPhi(t)
-        return (Phi@self.w_best).reshape(-1,self.ndof), (dPhi@self.w_best).reshape(-1,self.ndof), (ddPhi@self.w_best).reshape(-1,self.ndof)
+        obf.setup_task(T * np.ones(self.N_via) / self.N_via)
+        q = (obf.get_Phi(t) @ self.w_best).reshape(-1,self.ndof)
+        dq = (obf.get_dPhi(t) @ self.w_best).reshape(-1,self.ndof)
+        ddq = (obf.get_ddPhi(t) @ self.w_best).reshape(-1,self.ndof)
         
-    def shift_solution_forward(self, delta_t, N_next=0):
-        if self.w_best is None:
-            print('No solution available. Run optimization first.')
-            return
-        N_via = int(len(self.w_best) / self.ndof) - 3
-        if N_next == 0:
-            N_next = N_via
-        obf = OBF(self.ndof)
-        obf.setup_task(self.T_best * np.ones(N_via) / N_via)
-        T_next = self.T_best - delta_t
-        t_via = np.linspace(0, T_next, N_next+1) + delta_t
-        self.p_next = (obf.get_Phi(t_via) @ self.w_best).reshape(-1, self.ndof)[1:].flatten()
-        
-    def shift_solution_backward(self, delta_t, N_next=0):
-        if self.w_best is None:
-            print('No solution available. Run optimization first.')
-            return
-        N_via = int(len(self.w_best) / self.ndof) - 3
-        if N_next == 0:
-            N_next = N_via
-        obf = OBF(self.ndof)
-        obf.setup_task(self.T_best * np.ones(N_via) / N_via)
-        T_next = self.T_best - delta_t
-        t_via = np.linspace(0, T_next, N_next+1) + delta_t
-        q_via = (obf.get_Phi(t_via) @ self.w_best).reshape(-1, self.ndof)
-        self.p_next = (q_via[1:] - q_via[0]) .flatten()
+        return q, dq, ddq
 
+# Main class for the VPSTO algorithm
+# Usage:
+#   1. Create an instance of VPSTOOptions
+#   2. Set the options (optional)
+#   3. Create an instance of VPSTO
+#   4. Run the optimization (VPSTO.minimize(loss))
 class VPSTO():
-    def __init__(self, ndof):
-        self.opt = VPSTOOptions(ndof)
-        self.sol = VPSTOSolution(ndof)
+    def __init__(self, options):
+        self.opt = options
+        self.vptraj = VPTraj(options.ndof, 
+                             options.N_eval, 
+                             options.N_via,
+                             options.vel_lim,
+                             options.acc_lim)
         
-    def setup_basis(self, fix_qT=False):
-        s_eval = np.linspace(0., 1., self.opt.N_eval)
-        obf = OBF(self.opt.ndof)
-        obf.setup_task(np.ones(self.opt.N_via)/self.opt.N_via)
+        self.p_init = None
         
-        self.Phi = obf.get_Phi(s_eval)
-        self.dPhi = obf.get_dPhi(s_eval)
-        self.ddPhi = obf.get_ddPhi(s_eval)
+    def set_initial_guess(self, p_init):
+        # Set the initial guess for the via-point parameters
+        # p_init: initial guess for the via-point parameters
+        self.p_init = p_init
         
-        if fix_qT is False:
-            self.dPhi_p = self.dPhi[:, self.opt.ndof:-2*self.opt.ndof]
-            self.dPhi_b = np.concatenate((self.dPhi[:, :self.opt.ndof],
-                                          self.dPhi[:, -2*self.opt.ndof:]), axis=1)
-            self.ddPhi_p = self.ddPhi[:, self.opt.ndof:-2*self.opt.ndof]
-            self.ddPhi_b = np.concatenate((self.ddPhi[:, :self.opt.ndof],
-                                           self.ddPhi[:, -2*self.opt.ndof:]), axis=1)
-        else:
-            self.dPhi_p = self.dPhi[:, self.opt.ndof:-3*self.opt.ndof]
-            self.dPhi_b = np.concatenate((self.dPhi[:, :self.opt.ndof],
-                                          self.dPhi[:, -3*self.opt.ndof:]), axis=1)
-            self.ddPhi_p = self.ddPhi[:, self.opt.ndof:-3*self.opt.ndof]
-            self.ddPhi_b = np.concatenate((self.ddPhi[:, :self.opt.ndof],
-                                           self.ddPhi[:, -3*self.opt.ndof:]), axis=1)
-        
-        sigma_p = np.linalg.inv(self.ddPhi_p.T @ self.ddPhi_p)
-        self.ddPhi_p_pinv = sigma_p @ self.ddPhi_p.T
-        eigv, V = np.linalg.eigh(sigma_p)
-        D = np.diag(eigv / np.max(eigv))
-        sigma_via = V @ D @ V.T
-        self.sigma_p_chol = np.linalg.cholesky(sigma_via)
-        self.sigma_p_chol_inv = np.linalg.inv(self.sigma_p_chol)
+    def minimize(self, loss, q0, dq0=None, qT=None, dqT=None, T=None):
+        # Run the optimization
+        # loss: loss function. Must take a dictionary of the form 
+        # {'pos': q, 'vel': dq, 'acc': ddq, 'T': T}
+        # as input and return a cost value for each trajectory
+        # q0: initial position
+        # dq0: initial velocity (optional), default: 0
+        # qT: final position (optional), default: None
+        # dqT: final velocity (optional), default: None
+        # T: duration of the movement (optional), default: None
 
-    def get_duration(self, q_via_list, dq_bound):
-        pop_size = len(q_via_list)
-        dq_q = (q_via_list @ self.dPhi[:,:-2*self.opt.ndof].T).reshape(pop_size, -1, self.opt.ndof)
-        dq_dq = (self.dPhi[:,-2*self.opt.ndof:] @ dq_bound).reshape(-1, self.opt.ndof)
-        T_dq = np.maximum(np.max(dq_q / (self.opt.vel_lim - dq_dq), axis=(1, 2)),
-                          np.max(- dq_q / (self.opt.vel_lim + dq_dq), axis=(1, 2)))
-        
-        ddq_q = (q_via_list @ self.ddPhi[:,:-2*self.opt.ndof].T).reshape(pop_size, -1, self.opt.ndof)
-        ddq_dq = (self.ddPhi[:,-2*self.opt.ndof:] @ dq_bound).reshape(-1, self.opt.ndof)
-        T_p = ddq_dq / (2. * self.opt.acc_lim)
-        T_ddq = np.maximum(np.max(T_p + np.nan_to_num(np.sqrt(T_p**2 + ddq_q / self.opt.acc_lim), nan=-np.inf), axis=(1, 2)),
-                           np.max(-T_p + np.nan_to_num(np.sqrt(T_p**2 - ddq_q / self.opt.acc_lim), nan=-np.inf), axis=(1, 2)))
-        return np.maximum(T_dq, T_ddq)
-    
-    def compute_phenotype_candidates(self, p_list, q_0, q_T, dq_bound):
-        pop_size = len(p_list)
-        # Compute duration of each movement and roll out
-        if q_T is None:
-            q_via_list = np.concatenate((np.tile(q_0, (pop_size, 1)), p_list), axis=1)
-        else:
-            q_via_list = np.concatenate((np.tile(q_0, (pop_size, 1)), 
-                                         p_list, 
-                                         np.tile(q_T, (pop_size, 1))), axis=1)
-        T_list = self.get_duration(q_via_list, dq_bound)
-        w_list = np.concatenate((q_via_list, 
-                                 np.diag(T_list) @ np.tile(dq_bound, (pop_size, 1))), axis=1)
-        self.sol.candidates['pos'] = (w_list @ self.Phi.T).reshape(pop_size, -1, self.opt.ndof)
-        self.sol.candidates['vel'] = (np.diag(1/T_list) @ (w_list @ self.dPhi.T)).reshape(pop_size, -1, self.opt.ndof)
-        self.sol.candidates['acc'] = (np.diag(1/T_list**2) @ (w_list @ self.ddPhi.T)).reshape(pop_size, -1, self.opt.ndof)
-        self.sol.candidates['T'] = T_list
-        
-    def call_loss_multithreading(self, loss, candidate, costs, idx):
-        costs[idx] = loss(candidate)
-        
-    def loss_multithread(self, loss):
-        pop_size = len(self.sol.candidates['T'])
-        costs = np.empty(pop_size)
-        candidates = []
-        for i in range(pop_size):
-            candidates.append({'pos': self.sol.candidates['pos'][i],
-                               'vel': self.sol.candidates['vel'][i],
-                               'acc': self.sol.candidates['acc'][i],
-                               'T': self.sol.candidates['T'][i]})
-        with concurrent.futures.ThreadPoolExecutor(max_workers=pop_size) as executor:
-            futures = []
-            for i in range(pop_size):
-                futures.append(executor.submit(self.call_loss_multithreading, loss, candidates[i], costs, i))
-            for future in concurrent.futures.as_completed(futures):
-                future.result()
-        return costs
-        
-    def minimize(self, loss, q_0, q_T=None, dq_bound=None):
-        if dq_bound is None:
-            dq_bound = np.zeros(2*self.opt.ndof)
-        if q_T is None:
+        # Check input
+        if dq0 is None:
+            dq0 = np.zeros(self.opt.ndof)
+        if dqT is None and T is None:
+            print('Either T or dqT must be given. Setting dqT to zero.')
+            dqT = np.zeros(self.ndof)
+        if qT is None and dqT is None:
+            # qT and dqT are contained in p
+            dim_x = self.opt.ndof * (self.opt.N_via+1)
+            ddPhi_b = np.concatenate((self.vptraj.ddPhi[:, :self.opt.ndof],
+                                      self.vptraj.ddPhi[:, -2*self.opt.ndof:-self.opt.ndof]), 
+                                      axis=1)
+            mu_p = - self.vptraj.ddPhi_p_qdq @ ddPhi_b @ np.concatenate((q0, dq0))
+            sigma_p_chol = self.vptraj.S_qdq_chol
+            sigma_p_chol_inv = self.vptraj.S_qdq_chol_inv
+        elif qT is None:
+            # qT is contained in p
             dim_x = self.opt.ndof * self.opt.N_via
-            self.setup_basis(fix_qT = False)
-            mu_p = - self.ddPhi_p_pinv @ self.ddPhi_b @ np.concatenate((q_0, dq_bound))
+            ddPhi_b = np.concatenate((self.vptraj.ddPhi[:, :self.opt.ndof],
+                                      self.vptraj.ddPhi[:, -2*self.opt.ndof:]), 
+                                      axis=1)
+            mu_p = - self.vptraj.ddPhi_p_q @ ddPhi_b @ np.concatenate((q0, dq0, dqT))
+            sigma_p_chol = self.vptraj.S_q_chol
+            sigma_p_chol_inv = self.vptraj.S_q_chol_inv
+        elif dqT is None:
+            # dqT is contained in p
+            dim_x = self.opt.ndof * self.opt.N_via
+            ddPhi_b = np.concatenate((self.vptraj.ddPhi[:, :self.opt.ndof],
+                                      self.vptraj.ddPhi[:, -3*self.opt.ndof:-self.opt.ndof]), 
+                                      axis=1)
+            mu_p = - self.vptraj.ddPhi_p_dq @ ddPhi_b @ np.concatenate((q0, qT, dq0))
+            sigma_p_chol = self.vptraj.S_dq_chol
+            sigma_p_chol_inv = self.vptraj.S_dq_chol_inv
         else:
-            dim_x = self.opt.ndof * (self.opt.N_via - 1)
-            self.setup_basis(fix_qT = True)
-            mu_p = - self.ddPhi_p_pinv @ self.ddPhi_b @ np.concatenate((q_0, q_T, dq_bound))
-    
-        if self.sol.p_next is None:
+            # qT and dqT are given
+            dim_x = self.opt.ndof * (self.opt.N_via-1)
+            ddPhi_b = np.concatenate((self.vptraj.ddPhi[:, :self.opt.ndof],
+                                      self.vptraj.ddPhi[:, -3*self.opt.ndof:]), 
+                                      axis=1)
+            mu_p = - self.vptraj.ddPhi_p @ ddPhi_b @ np.concatenate((q0, qT, dq0, dqT))
+            sigma_p_chol = self.vptraj.S_chol
+            sigma_p_chol_inv = self.vptraj.S_chol_inv
+
+        # Initialize the solution
+        sol = VPSTOSolution(self.opt)
+        if self.p_init is not None:
+            x_init = sigma_p_chol_inv @ (self.p_init - mu_p)
+            self.p_init = None # Reset the initial guess so it is not used again
+        else:
             x_init = np.zeros(dim_x)
-        else:
-            x_init = self.sigma_p_chol_inv @ (self.sol.p_next - mu_p)
-            self.sol.p_next = None
         
         cmaes = cma.CMAEvolutionStrategy(x_init, self.opt.sigma_init, 
                                          {'CMA_diagonal': self.opt.CMA_diagonal, 
                                           'verbose': -1,
                                           'CMA_active': True,
                                           'popsize': self.opt.pop_size,
-                                          'tolfun': 1e-9})
-        self.sol.loss_list = []
+                                          'tolfun': 1e-6})
+        
+        # Run the optimization for max_iter iterations
+        # or until the stop criterion is met
         i = 0
+        sol.c_best = np.inf
         while not cmaes.stop() and i < self.opt.max_iter:
             x_samples = np.array(cmaes.ask())
-            p_samples = mu_p+(self.sigma_p_chol@x_samples.T).T
-            self.compute_phenotype_candidates(p_samples, q_0, q_T, dq_bound)
-            if i == 0:
-                self.sol.candidates_0 = deepcopy(self.sol.candidates)
-            if self.opt.multithreading is False:
-                costs = loss(self.sol.candidates)
+            p_samples = mu_p+(sigma_p_chol@x_samples.T).T
+            if T is None:
+                sol.candidates['T'] = self.vptraj.get_min_duration(p_samples, q0, dq0, qT, dqT)
             else:
-                costs = self.loss_multithread(loss)
+                sol.candidates['T'] = T * np.ones(self.opt.pop_size)
+            (sol.candidates['pos'],
+             sol.candidates['vel'],
+             sol.candidates['acc']) = self.vptraj.get_trajectory(p_samples,
+                                                                 q0, 
+                                                                 dq0, 
+                                                                 qT,
+                                                                 dqT,
+                                                                 sol.candidates['T'])
+            if self.opt.multithreading is False:
+                costs = loss(sol.candidates)
+            else:
+                costs = self.__loss_multithread(loss, sol)
             cmaes.tell(x_samples, costs)
-            self.sol.loss_list.append(np.mean(costs))
-            print('# VP-STO iteration:', i, 'Mean loss:', self.sol.loss_list[-1], end='\r')
+
+            # Update the best solution found so far
+            if np.min(costs) < sol.c_best:
+                i_best = np.argmin(costs)
+                sol.c_best = costs[i_best]
+                sol.T_best = sol.candidates['T'][i_best]
+                sol.p_best = mu_p+sigma_p_chol@cmaes.result.xbest
+
+            sol.p_mean = mu_p+sigma_p_chol@cmaes.result.xfavorite
+
+            # Logging the results if logging is enabled
+            if self.opt.log:
+                sol.candidates_list.append(p_samples)
+                sol.loss_list.append(costs)
+                sol.via_mean_list.append(sol.p_mean)
+                sol.via_best_list.append(sol.p_best)
+            
+            # Print the current iteration if verbose is enabled
+            if self.opt.verbose:
+                print('# VP-STO iteration:', i, 'Current loss:', sol.c_best, end='\r')
+            
             i += 1
         
-        x_best = cmaes.result.xfavorite
-        p_best = mu_p+self.sigma_p_chol@x_best
-        if q_T is None:
-            q_via_list = np.concatenate((q_0, p_best))
+        # Store w of final solution
+        if qT is None and dqT is None:
+            sol.w_best = np.concatenate((q0, sol.p_best[:-self.opt.ndof], dq0, sol.p_best[-self.opt.ndof:]))
+        elif qT is None:
+            sol.w_best = np.concatenate((q0, sol.p_best, dq0, dqT))
+        elif dqT is None:
+            sol.w_best = np.concatenate((q0, sol.p_best[:-self.opt.ndof], qT, dq0, sol.p_best[-self.opt.ndof:]))
         else:
-            q_via_list = np.concatenate((q_0, p_best, q_T))
-        self.sol.w_best = np.concatenate((q_via_list, dq_bound))
-        self.sol.T_best = self.get_duration(q_via_list.reshape(1,-1), dq_bound)[0]
+            sol.w_best = np.concatenate((q0, sol.p_best, qT, dq0, dqT))
         
-        print('VP-STO finished after', i, 'iterations with a final loss of', self.sol.loss_list[-1])
+        # Print the final results if verbose is enabled
+        if self.opt.verbose:
+            print('VP-STO finished after', i, 'iterations with a final loss of', sol.c_best)
         
-        return self.sol
-
-    def randomsearch(self, loss, q_0, dq_bound=None, sigma_track=1e-4, q_T_bias=None, r=1e-1, Q=None):
-        if dq_bound is None:
-            dq_bound = np.zeros(2*self.opt.ndof)
-        if q_T_bias is None:
-            q_T_bias = np.zeros(self.opt.ndof)
-        if Q is None:
-            Q = 0.0 * np.eye(self.opt.ndof)
-
-        dim_x = self.opt.ndof * self.opt.N_via
-        self.setup_basis(fix_qT = False)
-        
-        prec_smooth = self.ddPhi_p.T @ self.ddPhi_p * r / self.opt.N_eval
-        ddPhi_p_pinv = np.linalg.inv(prec_smooth) @ self.ddPhi_p.T * r / self.opt.N_eval
-        mu_smooth = - ddPhi_p_pinv @ self.ddPhi_b @ np.concatenate((q_0, dq_bound))
-        
-        Phi_T = self.Phi[-self.opt.ndof:, self.opt.ndof:-2*self.opt.ndof]
-        prec_bias = Phi_T.T @ Q @ Phi_T
-        mu_bias = np.tile(q_T_bias, self.opt.N_via)
-        
-        prec_via = prec_smooth + prec_bias
-        sigma_via = np.linalg.inv(prec_via)
-        mu_via = sigma_via @ (prec_smooth @ mu_smooth + prec_bias @ mu_bias)
+        return sol
     
-        if self.sol.p_next is None:
-            p_samples = np.random.multivariate_normal(mu_via, sigma_via, self.opt.pop_size)
-        else:
-            mu_prior = self.sol.p_next
-            prec_prior = np.eye(dim_x) / sigma_track
-            prec_post = prec_smooth + prec_prior
-            sigma_post = np.linalg.inv(prec_post)
-            mu_post = sigma_post @ (prec_prior @ mu_prior + prec_smooth @ mu_smooth)
-            num_samples = int(self.opt.pop_size*0.1)-2
-            #p_samples = np.random.multivariate_normal(mu_post, sigma_post, num_samples)
-            #p_samples = np.concatenate((mu_prior.reshape(1,-1), p_samples), axis=0)
-            p_samples = mu_prior.reshape(1,-1)
-            self.sol.p_next = None
+    def __call_loss_multithreading(self, loss, candidate, costs, idx):
+        costs[idx] = loss(candidate)
         
-        #p_samples = np.concatenate((mu_smooth.reshape(1,-1), p_samples), axis=0) # mu_smooth is zero action
-        self.compute_phenotype_candidates(p_samples, q_0, None, dq_bound)
-        self.sol.candidates_0 = deepcopy(self.sol.candidates)
-        if self.opt.multithreading is False:
-            costs = loss(self.sol.candidates)
-        else:
-            costs = self.loss_multithread(loss)
-        i_best = np.argmin(costs)
-        p_best = p_samples[i_best]
-        q_via_list = np.concatenate((q_0, p_best))
-        self.sol.w_best = np.concatenate((q_via_list, dq_bound))
-        self.sol.T_best = self.get_duration(q_via_list.reshape(1,-1), dq_bound)[0]
-        self.sol.loss_list = [costs[i_best]]
-        
-        print('VP-STO finished with a final loss of', costs[i_best], 'and duration of', self.sol.T_best)
-        
-        return self.sol
-
-    def sample_via_points(self, q_0, q_T=None, dq_bound=None, q_T_bias=None, r=1e-1, Q=None):
-        if dq_bound is None:
-            dq_bound = np.zeros(2*self.opt.ndof)
-        if q_T_bias is None:
-            q_T_bias = np.zeros(self.opt.ndof)
-        if Q is None:
-            Q = 0.0 * np.eye(self.opt.ndof)
-
-        dim_x = self.opt.ndof * self.opt.N_via
-        self.setup_basis(fix_qT = False)
-        
-        prec_smooth = self.ddPhi_p.T @ self.ddPhi_p * r / self.opt.N_eval
-        ddPhi_p_pinv = np.linalg.inv(prec_smooth) @ self.ddPhi_p.T * r / self.opt.N_eval
-        mu_smooth = - ddPhi_p_pinv @ self.ddPhi_b @ np.concatenate((q_0, dq_bound))
-        
-        Phi_T = self.Phi[-self.opt.ndof:, self.opt.ndof:-2*self.opt.ndof]
-        prec_bias = Phi_T.T @ Q @ Phi_T
-        mu_bias = np.tile(q_T_bias, self.opt.N_via)
-        
-        prec_via = prec_smooth + prec_bias
-        sigma_via = np.linalg.inv(prec_via)
-        mu_via = sigma_via @ (prec_smooth @ mu_smooth + prec_bias @ mu_bias)
-        
-        return np.random.multivariate_normal(mu_via, sigma_via)
+    def __loss_multithread(self, loss, sol):
+        pop_size = len(sol.candidates['T'])
+        costs = np.empty(pop_size)
+        candidates = []
+        for i in range(pop_size):
+            candidates.append({'pos': sol.candidates['pos'][i],
+                               'vel': sol.candidates['vel'][i],
+                               'acc': sol.candidates['acc'][i],
+                               'T': sol.candidates['T'][i]})
+        with concurrent.futures.ThreadPoolExecutor(max_workers=pop_size) as executor:
+            futures = []
+            for i in range(pop_size):
+                futures.append(executor.submit(self.__call_loss_multithreading, loss, candidates[i], costs, i))
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+        return costs

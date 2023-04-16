@@ -1,11 +1,22 @@
 import numpy as np
 
+# OBF class
+# This class is used to calculate the OBF coefficients in an efficient manner.
+# The OBF coefficients are calculated in the setup_task method.
+# The OBF coefficients are time-dependent and can be calculated using get_Phi(t), get_dPhi(t), and get_ddPhi(t).
+# The OBF coefficients map a weight vector w to a function y(t) = Phi(t) @ w.
+# What makes OBF special is how the weight vector w is composed.
+# The weight vector w is composed of a sequence of node positions, including the initial and final position and positions in between.
+# The weight vector w is also composed of the initial and final velocity.
+# The number of node positions that Phi is computed for is specified by the h argument in the setup_task method.
 class OBF():
     def __init__(self, ndof):
+        # ndof: number of degrees of freedom
         self.ndof = ndof
         self.h = np.empty(0)
 
     def setup_task(self, h):
+        # h: sequence of time intervals (e.g. [0.5, 0.5] for a 1 second task with two 0.5 second intervals)
         if np.array_equal(h, self.h):
             return
         self.h = h
@@ -20,6 +31,18 @@ class OBF():
             self.__M[n] = np.linalg.inv(M_inv)
 
         self.__P = self.__get_P()
+
+    def get_Phi(self, t):
+        # t: time, scalar or np.array
+        return self.__get_base(t,0)
+
+    def get_dPhi(self, t):
+        # t: time, scalar or np.array
+        return self.__get_base(t,1)
+
+    def get_ddPhi(self, t):
+        # t: time, scalar or np.array
+        return self.__get_base(t,2)
         
     def get_y(self, t, y_nodes, dy_0, dy_T):
         w = np.concatenate((y_nodes.flatten(), dy_0, dy_T))
@@ -45,16 +68,7 @@ class OBF():
             return ddy.reshape(self.ndof)
         return ddy.reshape(np.size(t), self.ndof)
 
-    def get_Phi(self, t):
-        return self.__get_base(t,0)
-
-    def get_dPhi(self, t):
-        return self.__get_base(t,1)
-
-    def get_ddPhi(self, t):
-        return self.__get_base(t,2)
-
-    def get_Omega(self, n):
+    def __get_Omega(self, n):
         return self.__M[n] @ (self.__get_L_w(n) + self.__get_L_dq(n) @ self.__P)
 
     def __get_base(self, t, der):
@@ -74,7 +88,7 @@ class OBF():
                     c_q[0, n] = 1.
                     c_dq = np.zeros((1, self.N + 1))
                     c_dq[0, n] = 1.
-                    Omega = self.get_Omega(n)
+                    Omega = self.__get_Omega(n)
                     if der == 0:
                         base_ = c_q + t__ * c_dq @ self.__P + np.array([[-t__**3/6, t__**2/2]]) @ Omega
                     elif der == 1:
