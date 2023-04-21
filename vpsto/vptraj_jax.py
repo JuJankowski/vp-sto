@@ -1,4 +1,4 @@
-from .obf import OBF
+from vpsto.obf import OBF
 import numpy as np
 import jax.numpy as jnp
 from jax import jit, lax, random
@@ -10,7 +10,7 @@ np.seterr(all="ignore") # ignore sqrt warning as it is handled inside the code
 #     0: qT subject to optimization
 #     1: qT is fixed
 
-@partial(jit, static_argnums=(0,1,), inline=True)
+@partial(jit, static_argnums=(0,1,))
 def sample_via_points(batch_size, N_via, q0, dq0, R, mu_qT, Q, mu_prior, P_prior, key):
     ### Static operations (only executed at compile time) ###
     ndof = q0.shape[0]
@@ -156,7 +156,7 @@ def batched_get_T_vel(p, q0, dq0, dqT, vel_lim):
     
     return T_dq
 
-#@jit
+@jit
 def batched_get_T_velacc(p, q0, dq0, dqT, vel_lim, acc_lim):
     ### Static operations (only executed at compile time) ###
     ndof = q0.shape[0]
@@ -196,7 +196,7 @@ def batched_get_T_velacc(p, q0, dq0, dqT, vel_lim, acc_lim):
                         jnp.max(-T_p + jnp.nan_to_num(jnp.sqrt(T_p**2 - ddq_q / acc_lim), nan=-jnp.inf), axis=(1, 2)))
     return jnp.maximum(T_dq, T_ddq)
 
-#@partial(jit, static_argnums=(0,))
+@partial(jit, static_argnums=(0,))
 def get_trajectory(N_eval, p, T, q0, dq0, dqT):
     ### Static operations (only executed at compile time) ###
     ndof = q0.shape[0]
@@ -244,5 +244,34 @@ def batched_get_trajectory(N_eval, p, T, q0, dq0, dqT):
     q = (Phi @ w.T).T.reshape(batch_size, N_eval, ndof)
     dq = (dPhi @ (w.T/T)).T.reshape(batch_size, N_eval, ndof)
     ddq = (ddPhi @ (w.T/T**2)).T.reshape(batch_size, N_eval, ndof)
+
+    return q, dq, ddq
+
+def get_trajectory_at_time(t, p, q0, dq0, dqT, T):
+    # Compute the trajectory from the given parameters at the given time
+    # t: time at which the trajectory should be evaluated, 0 <= t <= T
+    # p: via-point parameters
+    # q0: initial position
+    # dq0: initial velocity, will be set to zero if not given
+    # qT: final position, will be assumed to be contained in p if not given
+    # dqT: final velocity, will be assumed to be contained in p if not given
+    # T: duration of the trajectory, will be assumed to be T=1 if not given
+
+    ### Static operations (only executed at compile time) ###
+    ndof = q0.shape[0]
+    dim_p = p.shape[0]
+    N_via = dim_p // ndof
+    obf = OBF(ndof)
+    obf.setup_task(np.ones(N_via)/N_via)
+
+    Phi = obf.get_Phi(t/T)
+    dPhi = obf.get_dPhi(t/T) / T
+    ddPhi = obf.get_ddPhi(t/T) / T**2
+
+    ### Traced operations (optimized in run-time) ###
+    w = jnp.concatenate((q0, p, T * dq0, T * dqT))
+    q = (Phi @ w).reshape(-1,ndof)
+    dq = (dPhi @ w).reshape(-1,ndof)
+    ddq = (ddPhi @ w).reshape(-1,ndof)
 
     return q, dq, ddq

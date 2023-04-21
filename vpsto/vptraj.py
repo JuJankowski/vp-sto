@@ -1,5 +1,5 @@
 import numpy as np
-from .obf import OBF
+from vpsto.obf import OBF
 
 np.seterr(all="ignore") # ignore sqrt warning as it is handled inside the code
 

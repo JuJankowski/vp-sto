@@ -2,8 +2,8 @@ import numpy as np
 import cma
 import concurrent.futures
 
-from .obf import OBF
-from .vptraj import VPTraj
+from vpsto.obf import OBF
+from vpsto.vptraj import VPTraj
 
 # Collection of options for the VPSTO algorithm
 class VPSTOOptions:
