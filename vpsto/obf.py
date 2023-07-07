@@ -20,6 +20,7 @@ class OBF():
         if np.array_equal(h, self.h):
             return
         self.h = h
+        self.t_nodes = np.concatenate(([0], np.cumsum(h)))
         self.N = len(h)
         self.T = np.sum(h)
         self.nw_scalar = self.N + 1 + 2
@@ -32,17 +33,107 @@ class OBF():
 
         self.__P = self.__get_P()
 
+        Omegas = []
+        for n in range(self.N):
+            Omegas.append(self.__get_Omega(n))
+        self.Omegas = np.array(Omegas)
+
+    def get_basis(self, t):
+        # Compute Phi, dPhi, ddPhi
+        # t: time, scalar or np.array
+        t_len = np.size(t)
+
+        t = np.maximum(0.0, np.minimum(self.T, t))
+        lower_node_indeces = np.argmax(t[:,None] <= self.t_nodes[1:], axis=1)
+        t__ = t - self.t_nodes[lower_node_indeces]
+
+        c_q = np.zeros((t_len, self.nw_scalar))
+        c_dq = np.zeros((t_len, self.N + 1))
+        # Set the correct column according to lower_node_indeces to 1
+        c_q[np.arange(t_len), lower_node_indeces] = 1.
+        c_dq[np.arange(t_len), lower_node_indeces] = 1.
+        Omega = self.Omegas[lower_node_indeces] # (t_len, 2, 5)
+
+        t_feature = np.concatenate((-t__[:, None]**3/6, t__[:, None]**2/2), axis=1) # (t_len, 2)
+        dt_feature = np.concatenate((-t__[:, None]**2/2, t__[:, None]), axis=1) # (t_len, 2)
+        ddt_feature = np.concatenate((-t__[:, None], np.ones_like(t__).reshape(-1, 1)), axis=1) # (t_len, 2)
+
+        Phi_ = c_q + t__[:,None] * c_dq @ self.__P + np.sum(t_feature[:, :, None] * Omega, axis=1)
+        Phi = np.kron(Phi_, np.eye(self.ndof))
+        dPhi_ = c_dq @ self.__P + np.sum(dt_feature[:, :, None] * Omega, axis=1)
+        dPhi = np.kron(dPhi_, np.eye(self.ndof))
+        ddPhi_ = np.sum(ddt_feature[:, :, None] * Omega, axis=1)
+        ddPhi = np.kron(ddPhi_, np.eye(self.ndof))
+
+        return Phi, dPhi, ddPhi
+
     def get_Phi(self, t):
         # t: time, scalar or np.array
-        return self.__get_base(t,0)
+        t_len = np.size(t)
+
+        t = np.maximum(0.0, np.minimum(self.T, t))
+        lower_node_indeces = np.argmax(t[:,None] <= self.t_nodes[1:], axis=1)
+        t__ = t - self.t_nodes[lower_node_indeces]
+
+        c_q = np.zeros((t_len, self.nw_scalar))
+        c_dq = np.zeros((t_len, self.N + 1))
+        # Set the correct column according to lower_node_indeces to 1
+        c_q[np.arange(t_len), lower_node_indeces] = 1.
+        c_dq[np.arange(t_len), lower_node_indeces] = 1.
+        Omega = self.Omegas[lower_node_indeces] # (t_len, 2, 5)
+
+        t_feature = np.concatenate((-t__[:, None]**3/6, t__[:, None]**2/2), axis=1) # (t_len, 2)
+
+        base_ = c_q + t__[:,None] * c_dq @ self.__P + np.sum(t_feature[:, :, None] * Omega, axis=1)
+        base = np.kron(base_, np.eye(self.ndof))
+
+        return base
 
     def get_dPhi(self, t):
+        # Compute dPhi
         # t: time, scalar or np.array
-        return self.__get_base(t,1)
+        t_len = np.size(t)
+
+        t = np.maximum(0.0, np.minimum(self.T, t))
+        lower_node_indeces = np.argmax(t[:,None] <= self.t_nodes[1:], axis=1)
+        t__ = t - self.t_nodes[lower_node_indeces]
+
+        c_q = np.zeros((t_len, self.nw_scalar))
+        c_dq = np.zeros((t_len, self.N + 1))
+        # Set the correct column according to lower_node_indeces to 1
+        c_q[np.arange(t_len), lower_node_indeces] = 1.
+        c_dq[np.arange(t_len), lower_node_indeces] = 1.
+        Omega = self.Omegas[lower_node_indeces] # (t_len, 2, 5)
+
+        dt_feature = np.concatenate((-t__[:, None]**2/2, t__[:, None]), axis=1) # (t_len, 2)
+
+        dPhi_ = c_dq @ self.__P + np.sum(dt_feature[:, :, None] * Omega, axis=1)
+        dPhi = np.kron(dPhi_, np.eye(self.ndof))
+
+        return dPhi
 
     def get_ddPhi(self, t):
+        # Compute ddPhi
         # t: time, scalar or np.array
-        return self.__get_base(t,2)
+        t_len = np.size(t)
+
+        t = np.maximum(0.0, np.minimum(self.T, t))
+        lower_node_indeces = np.argmax(t[:,None] <= self.t_nodes[1:], axis=1)
+        t__ = t - self.t_nodes[lower_node_indeces]
+
+        c_q = np.zeros((t_len, self.nw_scalar))
+        c_dq = np.zeros((t_len, self.N + 1))
+        # Set the correct column according to lower_node_indeces to 1
+        c_q[np.arange(t_len), lower_node_indeces] = 1.
+        c_dq[np.arange(t_len), lower_node_indeces] = 1.
+        Omega = self.Omegas[lower_node_indeces] # (t_len, 2, 5)
+
+        ddt_feature = np.concatenate((-t__[:, None], np.ones_like(t__).reshape(-1, 1)), axis=1) # (t_len, 2)
+
+        ddPhi_ = np.sum(ddt_feature[:, :, None] * Omega, axis=1)
+        ddPhi = np.kron(ddPhi_, np.eye(self.ndof))
+
+        return ddPhi
         
     def get_y(self, t, y_nodes, dy_0, dy_T):
         w = np.concatenate((y_nodes.flatten(), dy_0, dy_T))
@@ -71,6 +162,7 @@ class OBF():
     def __get_Omega(self, n):
         return self.__M[n] @ (self.__get_L_w(n) + self.__get_L_dq(n) @ self.__P)
 
+    # Outdated: This function is not used anymore. It was too slow.
     def __get_base(self, t, der):
         base = np.zeros((self.ndof * np.size(t), self.ndof * self.nw_scalar))
         if np.size(t) == 1:

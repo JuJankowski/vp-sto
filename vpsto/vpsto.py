@@ -36,6 +36,7 @@ class VPSTOSolution:
         self.candidates['pos'] = None
         self.candidates['vel'] = None
         self.candidates['acc'] = None
+        self.candidates['p_via'] = None
         self.candidates['T'] = 0.0
         
         self.p_best = None # current best solution for the via-point parameters
@@ -180,6 +181,7 @@ class VPSTO():
                                                                  qT,
                                                                  dqT,
                                                                  sol.candidates['T'])
+            sol.candidates['p_via'] = p_samples
             if self.opt.multithreading is False:
                 costs = loss(sol.candidates)
             else:

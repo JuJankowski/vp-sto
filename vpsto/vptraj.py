@@ -5,7 +5,7 @@ np.seterr(all="ignore") # ignore sqrt warning as it is handled inside the code
 
 # Trajectory representation for the VPSTO algorithm
 class VPTraj:
-    def __init__(self, ndof, N_eval, N_via, vel_lim, acc_lim):
+    def __init__(self, ndof, N_eval, N_via, vel_lim=None, acc_lim=None):
         self.ndof = ndof       # number of degrees of freedom
         self.N_eval = N_eval   # number of evaluation points along trajectories in cost function
         self.N_via = N_via     # number of via-points
@@ -13,9 +13,9 @@ class VPTraj:
         self.acc_lim = acc_lim # -acc_lim < ddq < acc_lim (element-wise)
         self.__setup_basis()     # setup the basis functions for fast online retrieval
 
-    def sample_trajectories(self, N_traj, q0, dq0=None, qT=None, dqT=None, Q=None, R=None, mu_prior=None, P_prior=None, T=None):
+    def sample_trajectories(self, noise, q0, dq0=None, qT=None, dqT=None, Q=None, R=None, mu_prior=None, P_prior=None, T=None):
         # Sample trajectories from the posterior distribution.
-        # N_traj: number of trajectories to sample
+        # noise: (N_traj, dim_p), N_traj: number of trajectories to sample, dim_p: dimension of the via-point parameters
         # q0: initial position
         # dq0: initial velocity, will be set to zero if not given
         # qT: final position, assumed to be fixed if Q is None, will be assumed to be contained in p if not given
@@ -32,7 +32,10 @@ class VPTraj:
 
         # Check the input
         if R is None:
-            R = 1
+            R = np.eye(self.ndof)
+        elif isinstance(R, (int, float)):
+            R = R * np.eye(self.ndof)
+        R_horizon = np.kron(np.eye(self.N_eval), R) # penalization matrix for accelerations over time
         # Check if Q is a float and turn it into a matrix
         if Q is not None and isinstance(Q, (int, float)):
             Q = Q * np.eye(self.ndof)
@@ -52,7 +55,7 @@ class VPTraj:
                                       self.ddPhi[:, -self.ndof:]), axis=1)
             ddPhi_b = np.concatenate((self.ddPhi[:, :self.ndof],
                                       self.ddPhi[:, -2*self.ndof:-self.ndof]), axis=1)
-            P_smooth = ddPhi_p.T @ ddPhi_p * R / self.N_eval
+            P_smooth = ddPhi_p.T @ R_horizon @ ddPhi_p / self.N_eval
             mu_smooth = - self.ddPhi_p_qdq @ ddPhi_b @ np.concatenate((q0, dq0))
 
             Phi_T = np.concatenate((self.Phi[-self.ndof:, self.ndof:-2*self.ndof],
@@ -65,7 +68,7 @@ class VPTraj:
             ddPhi_p = self.ddPhi[:, self.ndof:-2*self.ndof]
             ddPhi_b = np.concatenate((self.ddPhi[:, :self.ndof],
                                       self.ddPhi[:, -2*self.ndof:]), axis=1)
-            P_smooth = ddPhi_p.T @ ddPhi_p * R / self.N_eval
+            P_smooth = ddPhi_p.T @ R_horizon @ ddPhi_p / self.N_eval
             mu_smooth = - self.ddPhi_p_q @ ddPhi_b @ np.concatenate((q0, dq0, dqT))
 
             Phi_T = self.Phi[-self.ndof:, self.ndof:-2*self.ndof]
@@ -86,8 +89,8 @@ class VPTraj:
         f_post = np.linalg.solve(L_P, P_smooth @ mu_smooth + P_prior @ mu_prior + P_bias @ mu_bias)
 
         # Sample from the posterior
-        self.white_noise = np.random.normal(size=(N_traj, dim_p))
-        p = np.linalg.solve(L_P.T, (f_post + self.white_noise).T).T # np.random.multivariate_normal(mu_post, sigma_post, N_traj)
+        # self.white_noise = np.random.normal(size=(N_traj, dim_p))
+        p = np.linalg.solve(L_P.T, (f_post + noise).T).T # np.random.multivariate_normal(mu_post, sigma_post, N_traj)
 
         if T is None:
             T = self.get_min_duration(p, q0, dq0, None, dqT)
@@ -218,24 +221,27 @@ class VPTraj:
         if T is None:
             T = 1.0
             
+        # Adapt w to the duration of the trajectory
+        w[-2*self.ndof:] *= T
+
         # Recompute the basis functions for the duration and at the specified time
-        obf = OBF(self.ndof)
-        obf.setup_task(T * np.ones(self.N_via) / self.N_via)
-        q = (obf.get_Phi(t) @ w).reshape(-1,self.ndof)
-        dq = (obf.get_dPhi(t) @ w).reshape(-1,self.ndof)
-        ddq = (obf.get_ddPhi(t) @ w).reshape(-1,self.ndof)
+        Phi, dPhi, ddPhi = self.obf.get_basis(t/T)
+
+        q = (Phi @ w.T).T.reshape(-1, self.ndof)
+        dq = (dPhi @ (w.T/T)).T.reshape(-1, self.ndof)
+        ddq = (ddPhi @ (w.T/T**2)).T.reshape(-1, self.ndof)
 
         return q, dq, ddq
     
     def __setup_basis(self):
         s_eval = np.linspace(0., 1., self.N_eval)
-        obf = OBF(self.ndof)
-        obf.setup_task(np.ones(self.N_via)/self.N_via)
+        self.obf = OBF(self.ndof)
+        self.obf.setup_task(np.ones(self.N_via)/self.N_via)
         
         # Compute the basis functions: Phi, dPhi, ddPhi. (N_eval*ndof, (N_via+3)*ndof)
-        self.Phi = obf.get_Phi(s_eval)
-        self.dPhi = obf.get_dPhi(s_eval)
-        self.ddPhi = obf.get_ddPhi(s_eval)
+        self.Phi = self.obf.get_Phi(s_eval)
+        self.dPhi = self.obf.get_dPhi(s_eval)
+        self.ddPhi = self.obf.get_ddPhi(s_eval)
         
         # Compute the smoothing matrix for the case: qT fixed and dqT fixed
         ddPhi_p = self.ddPhi[:, self.ndof:-3*self.ndof]
