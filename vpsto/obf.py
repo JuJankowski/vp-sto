@@ -1,4 +1,44 @@
 import numpy as np
+import jax.numpy as jnp
+from jax import jit
+from functools import partial
+
+@partial(jit, static_argnums=(0,1,2,))
+def get_basis_jax(ndof, nw_scalar, N, t, t_nodes, Omegas, P):
+    # Compute Phi, dPhi, ddPhi
+    # t: time, scalar or np.array
+    
+    # static operations
+    t_len = np.size(t)
+    c_q = np.zeros((t_len, nw_scalar))
+    c_dq = np.zeros((t_len, N + 1))
+    t_indeces = np.arange(t_len)
+    ones_like_t = np.ones((t_len, 1))
+    eye_ndof = np.eye(ndof)
+
+    t = jnp.maximum(0.0, jnp.minimum(t_nodes[-1], t))
+    lower_node_indeces = jnp.argmax(t[:,None] <= t_nodes[1:], axis=1)
+    t__ = t - t_nodes[lower_node_indeces]
+
+    # Set the correct column according to lower_node_indeces to 1
+    c_q = jnp.array(c_q).at[t_indeces, lower_node_indeces].set(1.)
+    c_dq = jnp.array(c_dq).at[t_indeces, lower_node_indeces].set(1.)
+    # c_q[t_indeces, lower_node_indeces] = 1.
+    # c_dq[t_indeces, lower_node_indeces] = 1.
+    Omega = Omegas[lower_node_indeces] # (t_len, 2, 5)
+
+    t_feature = jnp.concatenate((-t__[:, None]**3/6, t__[:, None]**2/2), axis=1) # (t_len, 2)
+    dt_feature = jnp.concatenate((-t__[:, None]**2/2, t__[:, None]), axis=1) # (t_len, 2)
+    ddt_feature = jnp.concatenate((-t__[:, None], ones_like_t), axis=1) # (t_len, 2)
+
+    Phi_ = c_q + t__[:,None] * c_dq @ P + jnp.sum(t_feature[:, :, None] * Omega, axis=1)
+    Phi = jnp.kron(Phi_, eye_ndof)
+    dPhi_ = c_dq @ P + jnp.sum(dt_feature[:, :, None] * Omega, axis=1)
+    dPhi = jnp.kron(dPhi_, eye_ndof)
+    ddPhi_ = jnp.sum(ddt_feature[:, :, None] * Omega, axis=1)
+    ddPhi = jnp.kron(ddPhi_, eye_ndof)
+
+    return Phi, dPhi, ddPhi
 
 # OBF class
 # This class is used to calculate the OBF coefficients in an efficient manner.
@@ -66,6 +106,12 @@ class OBF():
         ddPhi = np.kron(ddPhi_, np.eye(self.ndof))
 
         return Phi, dPhi, ddPhi
+    
+    def get_basis_jax(self, t):
+        # Jaxified version of the above get_basis method.
+        # Only use this method if the length of t is constant
+        # and if setup_task is only called once.
+        return get_basis_jax(self.ndof, self.nw_scalar, self.N, t, self.t_nodes, self.Omegas, self.__P)
 
     def get_Phi(self, t):
         # t: time, scalar or np.array
