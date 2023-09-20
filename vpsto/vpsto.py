@@ -25,6 +25,7 @@ class VPSTOOptions:
         self.multithreading = False         # Set to True for concurrently executing the cost evaluation
         self.log = False                    # Set to True for logging the optimization process
         self.verbose = True                 # Set to True for printing the optimization progress
+        self.seed = None                    # Set to an integer for reproducible results
 
 # Container for the current solution of the VPSTO algorithm
 class VPSTOSolution:
@@ -160,7 +161,8 @@ class VPSTO():
                                           'verbose': -1,
                                           'CMA_active': True,
                                           'popsize': self.opt.pop_size,
-                                          'tolfun': 1e-6})
+                                          'tolfun': 1e-6, 
+                                          'seed': self.opt.seed})
         
         # Run the optimization for max_iter iterations
         # or until the stop criterion is met
