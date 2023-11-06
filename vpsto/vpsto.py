@@ -108,7 +108,7 @@ class VPSTO():
             dq0 = np.zeros(self.opt.ndof)
         if dqT is None and T is None:
             print('Either T or dqT must be given. Setting dqT to zero.')
-            dqT = np.zeros(self.ndof)
+            dqT = np.zeros(self.opt.ndof)
         if qT is None and dqT is None:
             # qT and dqT are contained in p
             dim_x = self.opt.ndof * (self.opt.N_via+1)
