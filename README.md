@@ -50,21 +50,32 @@ The [examples](https://github.com/JuJankowski/vp-sto/examples) folder contains c
 The optimization interface is intended to be easy to use, while exposing enough functionality to enable a wide range of applications. The main component that has to be customized by the user is the *loss* function that takes *pop_size* candidate trajectories and returns *pop_size* cost values. The following code example shows how to generate time-optimal trajectories for a 7-DoF robot:
 ```python
 import numpy as np
-from vpsto import VPSTO
+from vpsto.vpsto import VPSTO, VPSTOOptions
 
-def loss(candidates): # Implement a pure time-optimality loss
+def loss(candidates): 
+    # Implement a pure time-optimality loss
     return candidates['T']
 
-vpsto = VPSTO(ndof=7)
-vpsto.opt.vel_lim = np.array([1., 1., 1., 1., 0.5, 0.5, 0.5]) # max. rad/s for each DoF
-vpsto.opt.acc_lim = np.array([15., 7.5, 10., 12.5, 15., 20., 20.]) # max. rad/s^2 for each DoF
+opts = VPSTOOptions(ndof=7)
+opts.vel_lim = np.array([1., 1., 1., 1., 0.5, 0.5, 0.5]) # max. rad/s for each DoF
+opts.acc_lim = np.array([15., 7.5, 10., 12.5, 15., 20., 20.]) # max. rad/s^2 for each DoF
+opts.N_via = 2
+opts.pop_size = 20
+opts.max_iter = 100
+opts.sigma_init = 0.2
+opts.verbose = True 
+vpsto = VPSTO(opts)
 
 q0 = np.zeros(7) # Current robot configuration
+dq0 = np.zeros(7) # Current robot velocity
 qT = np.ones(7)  # Desired robot configuration
+dqT = np.zeros(7) # Desired robot velocity at the end of the movement
 
-solution = vpsto.minimize(loss, q0, qT)
+solution = vpsto.minimize(loss, q0, dq0=dq0, qT=qT, dqT=np.zeros_like(q0))
 movement_duration = solution.T_best
-pos, vel, acc = solution.get_trajectory(np.linspace(0, movement_duration, int(movement_duration*1000))) # Sample solution traj. with 1 ms resolution
+t_horizon = np.linspace(0, movement_duration, int(movement_duration*1000)) # Sample solution traj. with 1 ms resolution
+q, dq, ddq = vpsto.vptraj.get_trajectory_at_time(t_horizon, solution.p_best, q0=q0, dq0=dq0, qT=qT, 
+                                                 dqT=dqT, T=movement_duration)
 ```
 Output:
 ```
