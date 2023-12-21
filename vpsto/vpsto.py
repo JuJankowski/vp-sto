@@ -88,29 +88,30 @@ class VPSTO():
                              options.acc_lim)
         
         self.p_init = None
+    
+    def change_num_via(self, N_via):   
+        # Change the number of via-points -> requires reinstantiation of VPTraj
+        # N_via: new number of via-points
+        self.opt.N_via = N_via
+        self.vptraj = VPTraj(self.opt.ndof, 
+                             self.opt.N_eval, 
+                             self.opt.N_via,
+                             self.opt.vel_lim,
+                             self.opt.acc_lim)
+        self.vptraj.N_via = N_via
         
     def set_initial_guess(self, p_init):
         # Set the initial guess for the via-point parameters
         # p_init: initial guess for the via-point parameters
         self.p_init = p_init
-        
-    def minimize(self, loss, q0, dq0=None, qT=None, dqT=None, T=None):
-        # Run the optimization
-        # loss: loss function. Must take a dictionary of the form 
-        # {'pos': q, 'vel': dq, 'acc': ddq, 'T': T}
-        # as input and return a cost value for each trajectory
-        # q0: initial position
-        # dq0: initial velocity (optional), default: 0
-        # qT: final position (optional), default: None
-        # dqT: final velocity (optional), default: None
-        # T: duration of the movement (optional), default: None
 
+    def check_input(self, q0, dq0, qT, dqT, T):
         # Check input
         if dq0 is None:
             dq0 = np.zeros(self.opt.ndof)
         if dqT is None and T is None:
             print('Either T or dqT must be given. Setting dqT to zero.')
-            dqT = np.zeros(self.ndof)
+            dqT = np.zeros(self.opt.ndof)
         if qT is None and dqT is None:
             # qT and dqT are contained in p
             dim_x = self.opt.ndof * (self.opt.N_via+1)
@@ -147,6 +148,21 @@ class VPSTO():
             mu_p = - self.vptraj.ddPhi_p @ ddPhi_b @ np.concatenate((q0, qT, dq0, dqT))
             sigma_p_chol = self.vptraj.S_chol
             sigma_p_chol_inv = self.vptraj.S_chol_inv
+        return dim_x, mu_p, sigma_p_chol, sigma_p_chol_inv  
+        
+    def minimize(self, loss, q0, dq0=None, qT=None, dqT=None, T=None):
+        # Run the optimization
+        # loss: loss function. Must take a dictionary of the form 
+        # {'pos': q, 'vel': dq, 'acc': ddq, 'T': T}
+        # as input and return a cost value for each trajectory
+        # q0: initial position
+        # dq0: initial velocity (optional), default: 0
+        # qT: final position (optional), default: None
+        # dqT: final velocity (optional), default: None
+        # T: duration of the movement (optional), default: None
+
+        # Check input and compute priors
+        dim_x, mu_p, sigma_p_chol, sigma_p_chol_inv = self.check_input(q0, dq0, qT, dqT, T)
 
         # Initialize the solution
         sol = VPSTOSolution(self.opt)
@@ -226,6 +242,35 @@ class VPSTO():
         if self.opt.verbose:
             print('VP-STO finished after', i, 'iterations with a final loss of', sol.c_best)
         
+        return sol
+    
+    def predictive_sampling(self, loss, q, dq, qT_bias, Q, R):
+        ### samples candidate trajectories and chooses the best one
+        
+        # Initialize the solution
+        sol = VPSTOSolution(self.opt)
+        dqT=np.zeros_like(dq)
+        # Sample candidate trajectories, compute their loss and return the best one
+        white_noise = np.random.normal(size=(self.opt.pop_size, self.opt.N_via*self.opt.ndof))
+        pos, vel, acc, p, T = self.vptraj.sample_trajectories(white_noise, q, dq0=dq, qT=qT_bias, 
+                                                              dqT=dqT, Q=Q, R=R)
+
+        sol.candidates['T'] = T * np.ones(self.opt.pop_size)
+        (sol.candidates['pos'],
+         sol.candidates['vel'],
+         sol.candidates['acc']) = self.vptraj.get_trajectory(p, q, dq0=dq, dqT=dqT, T=sol.candidates['T'])
+        sol.candidates['p_via'] = p
+        if self.opt.multithreading is False:
+            costs = loss(sol.candidates)
+        else:
+            costs = self.__loss_multithread(loss, sol)
+
+        # Update the best solution 
+        # if np.min(costs) < sol.c_best:
+        i_best = np.argmin(costs)
+        sol.c_best = costs[i_best]
+        sol.T_best = sol.candidates['T'][i_best]
+        sol.p_best = p[i_best]
         return sol
     
     def __call_loss_multithreading(self, loss, candidate, costs, idx):
