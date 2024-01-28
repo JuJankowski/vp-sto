@@ -11,8 +11,16 @@ Features:
 - Use a low resolution for fast optimization, and a high resolution for the final solution due to the **time-continuous trajectory representation**.
 - **Linear scaling** of the computational complexity with the number of DoFs: Easy-to-adopt for planning joint-space trajectories of robot arms, e.g. Franka Emika robot.
 
-![Sampling Banner](media/sampling_banner.gif)
-*The process of approximating time-optimal trajectories in cluttered environments (check out the example code for reproducing the results).*
+<img src="media/sampling_banner.gif" 
+        alt="MPC Navigation"
+        style="display: block; margin: 0 auto" />
+*The process of optimizing for collision-free, time-optimal trajectories in cluttered environments (check out the [example code](https://github.com/JuJankowski/vp-sto/blob/dev/examples/2D_collision_avoidance_set_final_position.ipynb) for reproducing the left environment).*
+
+<!-- Make the next image centered -->
+<img src="media/mpc_animation.gif" 
+        alt="MPC Navigation"
+        style="display: block; margin: 0 auto" />
+*VP-STO used in a Model-predictive Control task for navigating in dynamic environments (check out the [example code](https://github.com/JuJankowski/vp-sto/blob/dev/examples/2D_predictive_sampling.ipynb) for reproducing the results).*
 
 ---
 ### Dependencies
@@ -42,9 +50,9 @@ Note: If you want to install vp-sto in a conda environment, make sure to use the
 ---
 ### Examples
 
-The [examples](https://github.com/JuJankowski/vp-sto/examples) folder contains compact python notebooks with implementations for simple toy examples. They demonstrate the easy-to-use optimization interface and example implementations of typical discontinuous cost terms (e.g. collision avoidance). For a first overview, it is recommended to run the examples.
+The [examples](https://github.com/JuJankowski/vp-sto/tree/dev/examples) folder contains compact python notebooks with implementations for simple toy examples. They demonstrate the easy-to-use optimization interface and example implementations of typical discontinuous cost terms (e.g. collision avoidance). For a first overview, it is recommended to run the examples.
 
----
+<!-- ---
 ### Optimization Interface
 
 The optimization interface is intended to be easy to use, while exposing enough functionality to enable a wide range of applications. The main component that has to be customized by the user is the *loss* function that takes *pop_size* candidate trajectories and returns *pop_size* cost values. The following code example shows how to generate time-optimal trajectories for a 7-DoF robot:
@@ -75,4 +83,4 @@ It is also possible to evaluate the trajectory costs in concurrent threads. For 
 ```
 vpsto.opt.multithreading = True
 ```
-In the multithreading case, note that the custom loss function only takes a single candidate trajectory as input and is expected to return a single cost value. Multithreading can drastically speed up the optimization when the cost evaluation for a single trajectory is computationally expensive, e.g. when doing collision checks for an articulated robot arm. For cheap cost functions, such as the provided examples, the speed up due to paralellization does not compensate for the extra effort of creating the threads.
+In the multithreading case, note that the custom loss function only takes a single candidate trajectory as input and is expected to return a single cost value. Multithreading can drastically speed up the optimization when the cost evaluation for a single trajectory is computationally expensive, e.g. when doing collision checks for an articulated robot arm. For cheap cost functions, such as the provided examples, the speed up due to paralellization does not compensate for the extra effort of creating the threads. -->
